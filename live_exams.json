@@ -1,0 +1,16 @@
+{
+  "updatedAt": "2026-11-13T10:00:00Z",
+  "exams": [
+    {
+      "id": "jssc_utpad_sipahi_2026",
+      "title": "JSSC Jharkhand Excise Constable (Utpad Sipahi) Online Form",
+      "category": "NEW_FORM",
+      "state": "Jharkhand",
+      "boardBadge": "JSSC",
+      "targetUrl": "https://www.jpsc.gov.in/Civil_judge_junior_division_22_2023/login.php",
+      "notificationPdfUrl": "https://jceceb.jharkhand.gov.in",
+      "lastDate": "30 Nov 2026",
+      "isPinnedTop": true
+    }
+  ]
+}
