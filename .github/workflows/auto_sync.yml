@@ -1,0 +1,35 @@
+name: Auto Sync Sarkari Exams JSON
+
+on:
+  schedule:
+    - cron: '15 */6 * * *' # Har 6 ghante me 1 baar chalega (Din me 4 baar)
+  workflow_dispatch:       # Jab mann kare mobile se 1-click me manual run karein
+
+permissions:
+  contents: write
+
+jobs:
+  update-feed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install requests cloudscraper beautifulsoup4 lxml
+
+      - name: Run Exam Scraper Script
+        run: python scripts/update_exams.py
+
+      - name: Commit and Push Updated JSON
+        run: |
+          git config --global user.name "Sarkari One-Click Bot"
+          git config --global user.email "bot@noreply.github.com"
+          git add live_exams.json
+          git diff --staged --quiet || git commit -m "Auto-update live_exams.json"
+          git push
