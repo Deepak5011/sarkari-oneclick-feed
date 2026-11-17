@@ -1,16 +1,5 @@
 {
-  "updatedAt": "2026-11-13T10:00:00Z",
-  "exams": [
-    {
-      "id": "jssc_utpad_sipahi_2026",
-      "title": " Testing form 2026",
-      "category": "NEW_FORM",
-      "state": "Jharkhand",
-      "boardBadge": "JSSC",
-      "targetUrl": "https://www.jpsc.gov.in/Civil_judge_junior_division_22_2023/login.php",
-      "notificationPdfUrl": "https://jceceb.jharkhand.gov.in",
-      "lastDate": "30 Nov 2026",
-      "isPinnedTop": true
-    }
-  ]
+  "lastUpdated": "Not synced yet",
+  "announcementBanner": "🎯 100% Verified Direct Form Portals",
+  "items": []
 }
