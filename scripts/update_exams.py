@@ -40,8 +40,6 @@ DOMAIN_IN_TEXT_REGEX = re.compile(
 # ---------------------------------------------------------------------------
 # AUTHORITATIVE DIRECT OFFICIAL PORTAL DIRECTORY (Ordered Most-Specific First)
 # Format: (Board Badge, State, Keywords, Apply/Target URL, Login URL, Notice/Official URL)
-# Note: Specific state/PSU boards MUST appear BEFORE generic "SSC" or "UPSC"
-# so "UPSSSC", "UPESSC", "DSSSB", "AFMS SSC" never misroute to ssc.gov.in!
 # ---------------------------------------------------------------------------
 PORTAL_DIRECTORY = [
     # --- UTTAR PRADESH BOARDS ---
@@ -58,11 +56,11 @@ PORTAL_DIRECTORY = [
     ("ALLAHABAD HC", "Uttar Pradesh", ["allahabad hc", "allahabad high court"],
      "https://exams.nta.ac.in/AHC/", "https://exams.nta.ac.in/AHC/", "https://www.allahabadhighcourt.in/calendar/itemWiseList.jsp?group=7"),
 
-    # --- JHARKHAND BOARDS ---
+    # --- JHARKHAND BOARDS (Updated to jssc.jharkhand.gov.in & jpsc.jharkhand.gov.in) ---
     ("JSSC", "Jharkhand", ["jssc", "jharkhand staff", "jtet", "utpad sipahi", "jharkhand police", "jharkhand cgl", "jgglcce", "pgttce", "jcce"],
-     "https://jssc.nic.in/application-forms-apply", "https://jssc.nic.in/", "https://jssc.nic.in/notices/advertisements"),
+     "https://jssc.jharkhand.gov.in/user/login", "https://jssc.jharkhand.gov.in/user/login", "https://jssc.jharkhand.gov.in/"),
     ("JPSC", "Jharkhand", ["jpsc", "jharkhand psc", "jharkhand civil services"],
-     "https://www.jpsc.gov.in/online_application.php", "https://www.jpsc.gov.in/online_application.php", "https://www.jpsc.gov.in/exam_files.php"),
+     "https://jpsc.jharkhand.gov.in/", "https://jpsc.jharkhand.gov.in/", "https://jpsc.jharkhand.gov.in/"),
     ("JCECEB / JAC", "Jharkhand", ["jceceb", "jac ", "ekalyan", "ranchi university"],
      "https://jceceb.jharkhand.gov.in/", "https://jharkhanduniversities.nic.in/", "https://jceceb.jharkhand.gov.in/"),
 
@@ -169,10 +167,6 @@ PORTAL_DIRECTORY = [
 
 
 def fetch_html_resilient(url: str, timeout: int = 12):
-    """
-    Tries direct cloudscraper first. If blocked by Cloudflare on GitHub US runner,
-    falls back to AllOrigins raw proxy so scraping NEVER returns empty.
-    """
     try:
         resp = SCRAPER.get(url, headers=HEADERS, timeout=timeout)
         if resp.status_code == 200 and len(resp.text) > 800 and "Just a moment..." not in resp.text:
@@ -209,10 +203,6 @@ def is_banned_or_search_url(url: str) -> bool:
 
 
 def extract_domain_from_title(title: str):
-    """
-    Extracts explicit portal domain if present in title, e.g.:
-    'GSSSB Accountant Admit Card Out at gsssb.gujarat.gov.in' -> 'https://gsssb.gujarat.gov.in/'
-    """
     m = DOMAIN_IN_TEXT_REGEX.search(title or "")
     if m:
         dom = m.group(1).lower()
@@ -229,10 +219,6 @@ def resolve_portal_info(
     scraped_notif: str = None,
     scraped_official: str = None
 ):
-    """
-    Resolves 100% direct official portal URLs (Apply, Login, Notice, Official Website).
-    NEVER returns a google.com/search URL!
-    """
     lower = (title or "").lower()
     clean_primary = scraped_url if not is_banned_or_search_url(scraped_url) else None
     clean_login = scraped_login if not is_banned_or_search_url(scraped_login) else None
@@ -242,7 +228,6 @@ def resolve_portal_info(
 
     for badge, state, keywords, apply_url, login_url, notice_url in PORTAL_DIRECTORY:
         if any(k in lower for k in keywords):
-            # Guard against false ssc.gov.in or upsconline.nic.in scraped links on non-SSC/UPSC boards
             if badge != "SSC":
                 if clean_primary and "ssc.gov.in" in clean_primary:
                     clean_primary = None
@@ -255,11 +240,20 @@ def resolve_portal_info(
                     clean_primary = None
                 if clean_login and "upsconline.nic.in" in clean_login:
                     clean_login = None
+            if badge in ("JSSC", "JPSC"):
+                if clean_primary and ("jssc.nic.in" in clean_primary or "www.jpsc.gov.in" in clean_primary):
+                    clean_primary = None
+                if clean_login and ("jssc.nic.in" in clean_login or "www.jpsc.gov.in" in clean_login):
+                    clean_login = None
+                if clean_notif and ("jssc.nic.in" in clean_notif or "www.jpsc.gov.in" in clean_notif):
+                    clean_notif = None
+                if clean_official and ("jssc.nic.in" in clean_official or "www.jpsc.gov.in" in clean_official):
+                    clean_official = None
 
             final_target = clean_primary or title_domain_url or apply_url
             final_login = clean_login or title_domain_url or login_url or final_target
             final_notif = clean_notif or notice_url or clean_official or final_target
-            final_official = clean_official or title_domain_url or apply_url
+            final_official = clean_official or title_domain_url or notice_url or apply_url
             return badge, state, final_target, final_login, final_notif, final_official, True
 
     detected_state = "All India"
@@ -378,10 +372,6 @@ def extract_inner_post_details(post_url: str, category: str):
 
 
 def sanitize_existing_item(item: dict) -> dict:
-    """
-    Cleans any existing item in live_exams.json that previously had google.com/search
-    or misrouted ssc.gov.in URLs so old cached items are immediately repaired.
-    """
     title = item.get("title", "")
     category = item.get("category", "NEW_FORM")
     badge, state, target_url, login_url, notif_url, official_site, is_direct = resolve_portal_info(
@@ -441,7 +431,6 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
         if not candidates:
             continue
 
-        # Parallel inner-page scraping for ALL candidates (no 15-item cutoff!)
         details_by_href = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_map = {
@@ -504,11 +493,6 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
 
 
 def fetch_google_news_rss_backup(newly_discovered: list, existing_by_title: dict):
-    """
-    Guaranteed Backup Layer: Pulls latest National + State (Jharkhand/Bihar/UP)
-    exam headlines from Google News RSS and maps every single one to its DIRECT
-    official portal (ZERO google.com/search links).
-    """
     rss_queries = [
         ("NEW_FORM", "(SSC OR RRB OR IBPS OR SBI OR UPSC OR JSSC OR BPSC OR UPSSSC OR India Post) recruitment apply online notification"),
         ("ADMIT_CARD", "(SSC OR RRB OR IBPS OR UPSC OR JSSC OR BPSC OR UPSSSC OR NTA) admit card hall ticket released"),
@@ -565,7 +549,6 @@ def main():
             for item in data.get("items", []):
                 exp_dt = parse_date_str(item.get("expiryDate", ""))
                 if exp_dt is None or TODAY <= exp_dt:
-                    # Sanitize and upgrade existing items so ZERO google.com/search links survive
                     existing_items.append(sanitize_existing_item(item))
     except Exception:
         pass
@@ -573,10 +556,7 @@ def main():
     existing_by_title = {item["title"].lower(): item for item in existing_items}
     newly_discovered = []
 
-    # Layer 1: Scrape SarkariResult with parallel inner-page extraction
     scrape_sarkari_portals(newly_discovered, existing_by_title)
-
-    # Layer 2: Supplement with Multi-Board RSS mapped strictly to direct portals
     fetch_google_news_rss_backup(newly_discovered, existing_by_title)
 
     manual_pinned = [i for i in existing_items if i.get("isManual") is True]
