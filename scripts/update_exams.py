@@ -1,11 +1,21 @@
 import concurrent.futures
+import hashlib
 import json
 import re
 import urllib.parse
+import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
-import requests
-from bs4 import BeautifulSoup
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
 
 try:
     import cloudscraper
@@ -13,7 +23,7 @@ try:
         browser={"browser": "chrome", "platform": "windows", "mobile": False}
     )
 except Exception:
-    SCRAPER = requests.Session()
+    SCRAPER = requests.Session() if requests else None
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -31,9 +41,20 @@ BANNED_DOMAINS = [
     "dmca.com", "addtoany.com", "google.com/search", "google.co.in/search"
 ]
 
+# Non-exam clutter keywords to exclude (certificates, scholarships, voter/pan cards)
+NON_EXAM_CLUTTER_KEYWORDS = [
+    "income, cast", "caste certificate", "residential certificate", "scholarship",
+    "pan card", "aadhar card", "voter id", "driving licence", "ration card",
+    "ayushman card", "eshram card", "abaa card", "ccc online form"
+]
+
 DATE_REGEX = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b")
 DOMAIN_IN_TEXT_REGEX = re.compile(
     r"\b([a-z0-9-]+(?:\.[a-z0-9-]+)+\.(?:gov\.in|nic\.in|org\.in|ac\.in|org|com|in))\b",
+    re.IGNORECASE
+)
+POSTS_IN_TEXT_REGEX = re.compile(
+    r"\b(\d[\d,]*)\s*(?:posts?|vacancies|vacancy)\b",
     re.IGNORECASE
 )
 
@@ -45,7 +66,7 @@ PORTAL_DIRECTORY = [
     # --- UTTAR PRADESH BOARDS ---
     ("UPSSSC", "Uttar Pradesh", ["upsssc", "up pet", "up lekhpal", "up vdo", "cane supervisor", "havildar instructor"],
      "https://upsssc.gov.in/AllNotifications.aspx", "https://upsssc.gov.in/Online_App/Candidate_Login.aspx", "https://upsssc.gov.in/NoticeBoard.aspx"),
-    ("UPESSC", "Uttar Pradesh", ["upessc", "uphesc", "up tgt", "up pgt", "up principal", "up headmaster", "up assistant professor"],
+    ("UPESSC", "Uttar Pradesh", ["upessc", "uphesc", "up tgt", "up pgt", "up principal", "up headmaster", "up assistant professor", "up special tet"],
      "https://apply.upessc.org/login", "https://apply.upessc.org/login", "https://upessc.up.gov.in/"),
     ("UPPSC", "Uttar Pradesh", ["uppsc", "up pcs", "ro / aro", "ro aro"],
      "https://uppsc.up.nic.in/CandidatePages/Notifications.aspx", "https://uppsc.up.nic.in/CandidatePages/OTR_App/Candidate_Login.aspx", "https://uppsc.up.nic.in/"),
@@ -67,9 +88,9 @@ PORTAL_DIRECTORY = [
     # --- BIHAR BOARDS ---
     ("BIHAR VIDHAN SABHA", "Bihar", ["bihar vidhan sabha"],
      "https://vidhansabha.bih.nic.in/", "https://vidhansabha.bih.nic.in/", "https://vidhansabha.bih.nic.in/"),
-    ("BPSC", "Bihar", ["bpsc", "bihar tre", "bihar teacher", "bihar psc"],
+    ("BPSC", "Bihar", ["bpsc", "bihar tre", "bihar teacher", "bihar psc", "bihar apo"],
      "https://onlinebpsc.bihar.gov.in/", "https://onlinebpsc.bihar.gov.in/", "https://www.bpsc.bih.nic.in/"),
-    ("BSSC", "Bihar", ["bssc", "bihar ssc", "bihar inter level"],
+    ("BSSC", "Bihar", ["bssc", "bihar ssc", "bihar inter level", "blet", "bihar library"],
      "https://bssc.bihar.gov.in/NoticeBoard.htm", "https://bssc.bihar.gov.in/NoticeBoard.htm", "https://bssc.bihar.gov.in/NoticeBoard.htm"),
     ("BIHAR POLICE", "Bihar", ["csbc", "bihar police", "bpssc", "bihar daroga", "bihar si", "btsc"],
      "https://csbc.bihar.gov.in/", "https://bpssc.bih.nic.in/", "https://csbc.bihar.gov.in/"),
@@ -87,7 +108,7 @@ PORTAL_DIRECTORY = [
      "https://pscuk.net.in/", "https://pscuk.net.in/", "https://psc.uk.gov.in/candidate-corner/recruitment"),
     ("GSSSB", "All India", ["gsssb", "ojas", "gujarat"],
      "https://ojas.gujarat.gov.in/", "https://ojas.gujarat.gov.in/", "https://gsssb.gujarat.gov.in/"),
-    ("HPRCA", "All India", ["hprca", "himachal"],
+    ("HPRCA", "All India", ["hprca", "hp patwari", "himachal"],
      "https://hprca.hp.gov.in/", "https://hprca.hp.gov.in/", "https://hprca.hp.gov.in/"),
     ("OPSC", "All India", ["opsc", "odisha psc"],
      "https://www.opsc.gov.in/", "https://www.opsc.gov.in/", "https://www.opsc.gov.in/"),
@@ -103,6 +124,8 @@ PORTAL_DIRECTORY = [
      "https://site.sebaonline.org/", "https://site.sebaonline.org/", "https://site.sebaonline.org/"),
 
     # --- DEFENCE, PARAMILITARY & PSU BOARDS ---
+    ("WCL COAL INDIA", "All India", ["wcl ", "western coalfields", "coal india", "secl", "ncl "],
+     "https://www.westerncoal.in/?q=node/326", "https://www.westerncoal.in/", "https://www.westerncoal.in/?q=node/326"),
     ("AFMS", "All India", ["afms", "armed forces medical"],
      "https://amcsscentry.gov.in/", "https://amcsscentry.gov.in/", "https://amcsscentry.gov.in/"),
     ("IAF AFCAT", "All India", ["afcat", "air force"],
@@ -166,19 +189,63 @@ PORTAL_DIRECTORY = [
 ]
 
 
+def make_stable_id(category: str, title: str) -> str:
+    """Generates a deterministic, collision-free ID from category and normalized title."""
+    slug = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")[:36]
+    short_hash = hashlib.md5(title.lower().encode("utf-8")).hexdigest()[:6]
+    return f"{category.lower()}_{slug}_{short_hash}"
+
+
+def canonical_exam_signature(title: str, category: str) -> str:
+    """
+    Creates a normalized signature for fuzzy deduplication so 4 news sites reporting
+    on 'RRB ALP Answer Key 2026' don't create 4 duplicate cards.
+    """
+    stop_words = {
+        "out", "released", "download", "direct", "link", "here", "check", "now",
+        "online", "form", "recruitment", "notification", "pdf", "hall", "ticket",
+        "admit", "card", "answer", "key", "response", "sheet", "exam", "date",
+        "active", "soon", "expected", "at", "for", "and", "the", "in", "of", "to"
+    }
+    words = re.findall(r"[a-z0-9]+", title.lower())
+    core = [w for w in words if w not in stop_words and not w.isdigit() and len(w) > 1]
+    return f"{category}:{'_'.join(core[:4])}"
+
+
+def extract_posts_from_text(text: str) -> str:
+    """Extracts post count from title or summary text like '(17,735 Posts)' or '514 Vacancies'."""
+    m = POSTS_IN_TEXT_REGEX.search(text or "")
+    if m:
+        raw_num = m.group(1).replace(",", "")
+        if raw_num.isdigit() and int(raw_num) > 0:
+            return f"{int(raw_num):,} Posts"
+    return ""
+
+
+def http_get_text(url: str, timeout: int = 12) -> str:
+    if SCRAPER is not None:
+        resp = SCRAPER.get(url, headers=HEADERS, timeout=timeout)
+        if resp.status_code == 200:
+            return resp.text
+        return ""
+    req = urllib.request.Request(url, headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
+
+
 def fetch_html_resilient(url: str, timeout: int = 12):
     try:
-        resp = SCRAPER.get(url, headers=HEADERS, timeout=timeout)
-        if resp.status_code == 200 and len(resp.text) > 800 and "Just a moment..." not in resp.text:
-            return resp.text
+        text = http_get_text(url, timeout=timeout)
+        if text and len(text) > 800 and "Just a moment..." not in text:
+            return text
     except Exception:
         pass
 
     try:
         proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(url, safe='')}"
-        resp2 = requests.get(proxy_url, headers=HEADERS, timeout=15)
-        if resp2.status_code == 200 and len(resp2.text) > 800:
-            return resp2.text
+        text2 = http_get_text(proxy_url, timeout=15)
+        if text2 and len(text2) > 800:
+            return text2
     except Exception:
         pass
     return None
@@ -225,6 +292,10 @@ def resolve_portal_info(
     clean_notif = scraped_notif if not is_banned_or_search_url(scraped_notif) else None
     clean_official = scraped_official if not is_banned_or_search_url(scraped_official) else None
     title_domain_url = extract_domain_from_title(title)
+
+    if clean_primary and "drive.google.com" in clean_primary and not clean_notif:
+        clean_notif = clean_primary
+        clean_primary = None
 
     for badge, state, keywords, apply_url, login_url, notice_url in PORTAL_DIRECTORY:
         if any(k in lower for k in keywords):
@@ -279,6 +350,7 @@ def resolve_portal_info(
 def clean_title(raw_text: str) -> str:
     text = re.sub(r"\s+", " ", raw_text).strip()
     text = text.rsplit(" - ", 1)[0].strip()
+    text = re.split(r"(?i)\s*(?:;\s*check\b|:\s*check\b|:\s*download\b|,\s*check\b)", text)[0].strip()
     return re.sub(r"(?i)\b(sarkari\s*result|freejobalert)\b", "", text).strip(" -|•:")
 
 
@@ -294,13 +366,16 @@ def extract_inner_post_details(post_url: str, category: str):
         "shortSummary": ""
     }
     html = fetch_html_resilient(post_url, timeout=10)
-    if html:
+    if html and BeautifulSoup is not None:
         soup = BeautifulSoup(html, "lxml")
         expiry_dt = None
+        age_text = ""
+        qual_text = ""
+
         for li in soup.select("li"):
             txt = li.get_text(" ", strip=True)
             low = txt.lower()
-            if category == "NEW_FORM" and any(k in low for k in ["last date for apply", "last date to apply", "apply online last date"]):
+            if category == "NEW_FORM" and any(k in low for k in ["last date for apply", "last date to apply", "apply online last date", "last date :"]):
                 matches = DATE_REGEX.findall(txt)
                 if matches:
                     d, m, y = matches[-1]
@@ -316,13 +391,23 @@ def extract_inner_post_details(post_url: str, category: str):
                     if dt:
                         info["displayDate"] = f"Exam: {dt.strftime('%d/%m/%Y')}"
                         expiry_dt = dt + timedelta(days=2)
-            if ("minimum age" in low or "maximum age" in low) and not info["shortSummary"]:
-                info["shortSummary"] = txt[:65]
+            if ("minimum age" in low or "maximum age" in low) and not age_text:
+                age_text = txt[:55]
+            if any(q in low for q in ["bachelor degree", "10+2", "class 10th", "master degree", "diploma", "b.tech", "iti "]) and not qual_text:
+                qual_text = txt[:55]
+
+        info["shortSummary"] = " · ".join(filter(None, [qual_text, age_text]))[:85]
 
         full_text = soup.get_text(" ", strip=True)
-        pm = re.search(r"(?:Vacancy Details Total|Total\s+Post[s]?)\s*[:\-]?\s*(\d[\d,]*)", full_text, re.IGNORECASE)
+        pm = re.search(
+            r"(?:Vacancy Details Total|Total\s+Post[s]?|Total\s+Vacanc(?:y|ies))\s*[:\-]?\s*(\d[\d,]*)",
+            full_text,
+            re.IGNORECASE
+        )
         if pm:
-            info["totalPosts"] = f"{pm.group(1)} Posts"
+            raw_num = pm.group(1).replace(",", "")
+            if raw_num.isdigit() and int(raw_num) > 0:
+                info["totalPosts"] = f"{int(raw_num):,} Posts"
 
         for tr in soup.select("table tr"):
             tds = tr.find_all(["td", "th"])
@@ -372,7 +457,7 @@ def extract_inner_post_details(post_url: str, category: str):
 
 
 def sanitize_existing_item(item: dict) -> dict:
-    title = item.get("title", "")
+    title = clean_title(item.get("title", ""))
     category = item.get("category", "NEW_FORM")
     badge, state, target_url, login_url, notif_url, official_site, is_direct = resolve_portal_info(
         title,
@@ -382,17 +467,23 @@ def sanitize_existing_item(item: dict) -> dict:
         scraped_notif=item.get("notificationPdfUrl"),
         scraped_official=item.get("officialWebsiteUrl")
     )
+    item["id"] = make_stable_id(category, title)
+    item["title"] = title
     item["boardBadge"] = badge
     item["state"] = state
     item["targetUrl"] = target_url
     item["loginUrl"] = login_url
     item["notificationPdfUrl"] = notif_url
     item["officialWebsiteUrl"] = official_site
+    if not item.get("totalPosts"):
+        item["totalPosts"] = extract_posts_from_text(title)
     item["isDirectPortalMatch"] = is_direct
     return item
 
 
-def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
+def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict, seen_signatures: set):
+    if BeautifulSoup is None:
+        return
     mirrors = [
         "https://www.sarkariresult.com",
         "https://www.sarkariresults.org.in",
@@ -408,12 +499,15 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
 
         candidates = []
         seen_titles = set(existing_by_title.keys())
-        for a_tag in links[:110]:
+        for a_tag in links[:260]:
             raw_title = clean_title(a_tag.get_text())
             href = urllib.parse.urljoin(base_url, a_tag.get("href", ""))
-            if len(raw_title) < 12 or raw_title.lower() in seen_titles:
-                continue
             low = raw_title.lower()
+            if len(raw_title) < 12 or low in seen_titles:
+                continue
+            if any(clutter in low for clutter in NON_EXAM_CLUTTER_KEYWORDS):
+                continue
+
             if any(k in low for k in ["admit card", "hall ticket", "exam city", "call letter"]):
                 category = "ADMIT_CARD"
             elif any(k in low for k in ["answer key", "response sheet", "question paper"]):
@@ -423,16 +517,21 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
             else:
                 continue
 
-            seen_titles.add(raw_title.lower())
+            sig = canonical_exam_signature(raw_title, category)
+            if sig in seen_signatures:
+                continue
+
+            seen_titles.add(low)
+            seen_signatures.add(sig)
             candidates.append((raw_title, href, category))
-            if len(candidates) >= 45:
+            if len(candidates) >= 60:
                 break
 
         if not candidates:
             continue
 
         details_by_href = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
             future_map = {
                 executor.submit(extract_inner_post_details, href, cat): (raw_title, href, cat)
                 for raw_title, href, cat in candidates
@@ -466,8 +565,10 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
                 scraped_official=details.get("officialSite")
             )
 
+            posts_str = details.get("totalPosts") or extract_posts_from_text(raw_title)
+
             item = {
-                "id": f"sr_{category.lower()}_{len(newly_discovered)}",
+                "id": make_stable_id(category, raw_title),
                 "title": raw_title,
                 "category": category,
                 "state": state,
@@ -478,8 +579,8 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
                 "officialWebsiteUrl": official_site,
                 "lastDate": details.get("displayDate") or "Active Now",
                 "expiryDate": details.get("expiryIso"),
-                "totalPosts": details.get("totalPosts", ""),
-                "shortSummary": details.get("shortSummary", ""),
+                "totalPosts": posts_str,
+                "shortSummary": details.get("shortSummary") or f"Verified Direct Portal ({badge})",
                 "isDirectPortalMatch": is_direct,
                 "isPinnedTop": False,
                 "isManual": False
@@ -492,33 +593,42 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
             break
 
 
-def fetch_google_news_rss_backup(newly_discovered: list, existing_by_title: dict):
+def fetch_google_news_rss_backup(newly_discovered: list, existing_by_title: dict, seen_signatures: set):
     rss_queries = [
-        ("NEW_FORM", "(SSC OR RRB OR IBPS OR SBI OR UPSC OR JSSC OR BPSC OR UPSSSC OR India Post) recruitment apply online notification"),
-        ("ADMIT_CARD", "(SSC OR RRB OR IBPS OR UPSC OR JSSC OR BPSC OR UPSSSC OR NTA) admit card hall ticket released"),
-        ("ANSWER_KEY", "(SSC OR RRB OR IBPS OR JSSC OR BPSC OR UPSSSC OR NTA) answer key response sheet released")
+        ("NEW_FORM", "(SSC OR RRB OR IBPS OR SBI OR UPSC OR JSSC OR JPSC OR BPSC OR UPSSSC) recruitment apply online notification"),
+        ("ADMIT_CARD", "(SSC OR RRB OR IBPS OR UPSC OR JSSC OR JPSC OR BPSC OR UPSSSC) admit card hall ticket released"),
+        ("ANSWER_KEY", "(SSC OR RRB OR IBPS OR JSSC OR JPSC OR BPSC OR UPSSSC) answer key response sheet released")
     ]
     for category, q in rss_queries:
         encoded = urllib.parse.quote_plus(q)
         rss_url = f"https://news.google.com/rss/search?q={encoded}&hl=en-IN&gl=IN&ceid=IN:en"
         try:
-            resp = requests.get(rss_url, headers=HEADERS, timeout=10)
-            if resp.status_code != 200:
+            xml_text = http_get_text(rss_url, timeout=10)
+            if not xml_text:
                 continue
-            root = ET.fromstring(resp.content)
-            for item_el in root.findall(".//item")[:12]:
+            root = ET.fromstring(xml_text.encode("utf-8"))
+            for item_el in root.findall(".//item")[:8]:
                 raw_t = clean_title(item_el.findtext("title") or "")
-                if len(raw_t) < 12 or raw_t.lower() in existing_by_title:
+                low = raw_t.lower()
+                if len(raw_t) < 12 or low in existing_by_title:
+                    continue
+
+                sig = canonical_exam_signature(raw_t, category)
+                if sig in seen_signatures:
                     continue
 
                 badge, state, target_url, login_url, notif_url, official_site, is_direct = resolve_portal_info(
                     raw_t, category
                 )
+                if badge == "GOV PORTAL" and "ncs.gov.in" in target_url:
+                    continue
+
+                seen_signatures.add(sig)
                 days = 25 if category == "NEW_FORM" else (15 if category == "ADMIT_CARD" else 10)
                 exp_iso = (TODAY + timedelta(days=days)).strftime("%Y-%m-%d")
 
                 new_item = {
-                    "id": f"rss_{category.lower()}_{len(newly_discovered)}",
+                    "id": make_stable_id(category, raw_t),
                     "title": raw_t,
                     "category": category,
                     "state": state,
@@ -529,35 +639,44 @@ def fetch_google_news_rss_backup(newly_discovered: list, existing_by_title: dict
                     "officialWebsiteUrl": official_site,
                     "lastDate": "Active Now" if category == "NEW_FORM" else "Out Now",
                     "expiryDate": exp_iso,
-                    "totalPosts": "",
+                    "totalPosts": extract_posts_from_text(raw_t),
                     "shortSummary": f"Direct Official Portal ({badge})",
                     "isDirectPortalMatch": is_direct,
                     "isPinnedTop": False,
                     "isManual": False
                 }
                 newly_discovered.append(new_item)
-                existing_by_title[raw_t.lower()] = new_item
+                existing_by_title[low] = new_item
         except Exception as e:
             print(f"RSS backup warning: {e}")
 
 
 def main():
     existing_items = []
+    seen_signatures = set()
+
     try:
         with open("live_exams.json", "r", encoding="utf-8") as f:
             data = json.load(f)
             for item in data.get("items", []):
+                low_t = (item.get("title") or "").lower()
+                if any(clutter in low_t for clutter in NON_EXAM_CLUTTER_KEYWORDS):
+                    continue
                 exp_dt = parse_date_str(item.get("expiryDate", ""))
                 if exp_dt is None or TODAY <= exp_dt:
-                    existing_items.append(sanitize_existing_item(item))
+                    cleaned = sanitize_existing_item(item)
+                    sig = canonical_exam_signature(cleaned["title"], cleaned["category"])
+                    if sig not in seen_signatures:
+                        seen_signatures.add(sig)
+                        existing_items.append(cleaned)
     except Exception:
         pass
 
     existing_by_title = {item["title"].lower(): item for item in existing_items}
     newly_discovered = []
 
-    scrape_sarkari_portals(newly_discovered, existing_by_title)
-    fetch_google_news_rss_backup(newly_discovered, existing_by_title)
+    scrape_sarkari_portals(newly_discovered, existing_by_title, seen_signatures)
+    fetch_google_news_rss_backup(newly_discovered, existing_by_title, seen_signatures)
 
     manual_pinned = [i for i in existing_items if i.get("isManual") is True]
     regular_existing = [i for i in existing_items if not i.get("isManual")]
@@ -572,7 +691,7 @@ def main():
     with open("live_exams.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    print(f"✅ SUCCESS: Added {len(newly_discovered)} new items. Total items in live_exams.json: {len(final_items)} (0 Google Search links)")
+    print(f"✅ SUCCESS: Added {len(newly_discovered)} new items. Total deduplicated items: {len(final_items)}")
 
 
 if __name__ == "__main__":
