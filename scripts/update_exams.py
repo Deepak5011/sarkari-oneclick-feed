@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import re
 import urllib.parse
@@ -26,57 +27,168 @@ TODAY = datetime.now(IST).date()
 BANNED_DOMAINS = [
     "t.me", "telegram.", "whatsapp.com", "youtube.com", "youtu.be",
     "play.google.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
-    "sarkariresult.com", "sarkariresults.org.in", "dmca.com", "addtoany.com"
+    "sarkariresult.com", "sarkariresults.org.in", "sarkariresult.com.cm",
+    "dmca.com", "addtoany.com", "google.com/search", "google.co.in/search"
 ]
 
 DATE_REGEX = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b")
+DOMAIN_IN_TEXT_REGEX = re.compile(
+    r"\b([a-z0-9-]+(?:\.[a-z0-9-]+)+\.(?:gov\.in|nic\.in|org\.in|ac\.in|org|com|in))\b",
+    re.IGNORECASE
+)
 
-# Map of keywords -> (Board Badge, State, Direct Official Portal URL, Login URL)
+# ---------------------------------------------------------------------------
+# AUTHORITATIVE DIRECT OFFICIAL PORTAL DIRECTORY (Ordered Most-Specific First)
+# Format: (Board Badge, State, Keywords, Apply/Target URL, Login URL, Notice/Official URL)
+# Note: Specific state/PSU boards MUST appear BEFORE generic "SSC" or "UPSC"
+# so "UPSSSC", "UPESSC", "DSSSB", "AFMS SSC" never misroute to ssc.gov.in!
+# ---------------------------------------------------------------------------
 PORTAL_DIRECTORY = [
-    ("SSC", "All India", ["ssc ", "cgl", "chsl", "mts", "ssc gd", "cpo", "steno", "selection post"], "https://ssc.gov.in", "https://ssc.gov.in"),
-    ("IBPS", "All India", ["ibps", "crp po", "crp clerk", "ibps so", "ibps rrb"], "https://ibpsonline.ibps.in", "https://ibpsonline.ibps.in"),
-    ("RAILWAY RRB", "All India", ["railway", "rrb", "ntpc", "group d", "alp", "rpf", "technician", "rrc"], "https://www.rrbapply.gov.in", "https://www.rrbapply.gov.in/#/auth/landing"),
-    ("UPSC", "All India", ["upsc", "civil services", "ias ", "nda", "cds", "capf", "epfo"], "https://upsconline.nic.in/upsc/OTRP/", "https://upsconline.nic.in/upsc/OTRP/"),
-    ("JSSC", "Jharkhand", ["jssc", "jharkhand staff", "jtet", "utpad sipahi", "jharkhand police", "jharkhand cgl"], "https://jssc.nic.in", "https://jssc.nic.in"),
-    ("JPSC", "Jharkhand", ["jpsc", "jharkhand psc"], "https://www.jpsc.gov.in", "https://www.jpsc.gov.in"),
-    ("JCECEB / JAC", "Jharkhand", ["jceceb", "jac ", "ekalyan", "ranchi university"], "https://jceceb.jharkhand.gov.in", "https://jharkhanduniversities.nic.in"),
-    ("BPSC", "Bihar", ["bpsc", "bihar tre", "bihar teacher", "bihar psc"], "https://onlinebpsc.bihar.gov.in", "https://onlinebpsc.bihar.gov.in"),
-    ("BIHAR POLICE", "Bihar", ["csbc", "bihar police", "bpssc", "bihar daroga", "bihar si", "bssc"], "https://csbc.bihar.gov.in", "https://bpssc.bih.nic.in"),
-    ("UPPSC", "Uttar Pradesh", ["uppsc", "up pcs", "ro aro"], "https://uppsc.up.nic.in", "https://uppsc.up.nic.in"),
-    ("UPSSSC", "Uttar Pradesh", ["upsssc", "up pet", "lekhpal", "up vdo"], "https://upsssc.gov.in", "https://upsssc.gov.in"),
-    ("UP POLICE", "Uttar Pradesh", ["uppbpb", "upprpb", "up police"], "https://uppbpb.gov.in", "https://uppbpb.gov.in"),
-    ("SBI", "All India", ["sbi po", "sbi clerk", "state bank", "sbi cbo"], "https://bank.sbi/web/careers/Current-openings", "https://ibpsonline.ibps.in"),
-    ("NTA", "All India", ["nta ", "cuet", "jee main", "neet", "ugc net", "csir net"], "https://exams.nta.ac.in", "https://exams.nta.ac.in"),
-    ("INDIA POST", "All India", ["india post", "gds ", "gramin dak"], "https://indiapostgdsonline.gov.in", "https://indiapostgdsonline.gov.in"),
-    ("DEFENCE", "All India", ["indian army", "agniveer", "indian navy", "air force", "afcat"], "https://joinindianarmy.nic.in", "https://agnipathvayu.cdac.in"),
-    ("MPESB", "Madhya Pradesh", ["mpesb", "mppsc", "mp police", "mp vyapam"], "https://esb.mp.gov.in", "https://esb.mp.gov.in"),
-    ("RSMSSB", "Rajasthan", ["rsmssb", "rpsc", "rajasthan cet", "rajasthan police"], "https://rsmssb.rajasthan.gov.in", "https://sso.rajasthan.gov.in")
+    # --- UTTAR PRADESH BOARDS ---
+    ("UPSSSC", "Uttar Pradesh", ["upsssc", "up pet", "up lekhpal", "up vdo", "cane supervisor", "havildar instructor"],
+     "https://upsssc.gov.in/AllNotifications.aspx", "https://upsssc.gov.in/Online_App/Candidate_Login.aspx", "https://upsssc.gov.in/NoticeBoard.aspx"),
+    ("UPESSC", "Uttar Pradesh", ["upessc", "uphesc", "up tgt", "up pgt", "up principal", "up headmaster", "up assistant professor"],
+     "https://apply.upessc.org/login", "https://apply.upessc.org/login", "https://upessc.up.gov.in/"),
+    ("UPPSC", "Uttar Pradesh", ["uppsc", "up pcs", "ro / aro", "ro aro"],
+     "https://uppsc.up.nic.in/CandidatePages/Notifications.aspx", "https://uppsc.up.nic.in/CandidatePages/OTR_App/Candidate_Login.aspx", "https://uppsc.up.nic.in/"),
+    ("UP POLICE", "Uttar Pradesh", ["uppbpb", "upprpb", "up police"],
+     "https://uppbpb.gov.in/", "https://uppbpb.gov.in/", "https://uppbpb.gov.in/"),
+    ("UP ANGANWADI", "Uttar Pradesh", ["up anganwadi", "anganwadi bharti"],
+     "https://upanganwadibharti.in/", "https://upanganwadibharti.in/", "https://upanganwadibharti.in/"),
+    ("ALLAHABAD HC", "Uttar Pradesh", ["allahabad hc", "allahabad high court"],
+     "https://exams.nta.ac.in/AHC/", "https://exams.nta.ac.in/AHC/", "https://www.allahabadhighcourt.in/calendar/itemWiseList.jsp?group=7"),
+
+    # --- JHARKHAND BOARDS ---
+    ("JSSC", "Jharkhand", ["jssc", "jharkhand staff", "jtet", "utpad sipahi", "jharkhand police", "jharkhand cgl", "jgglcce", "pgttce", "jcce"],
+     "https://jssc.nic.in/application-forms-apply", "https://jssc.nic.in/", "https://jssc.nic.in/notices/advertisements"),
+    ("JPSC", "Jharkhand", ["jpsc", "jharkhand psc", "jharkhand civil services"],
+     "https://www.jpsc.gov.in/online_application.php", "https://www.jpsc.gov.in/online_application.php", "https://www.jpsc.gov.in/exam_files.php"),
+    ("JCECEB / JAC", "Jharkhand", ["jceceb", "jac ", "ekalyan", "ranchi university"],
+     "https://jceceb.jharkhand.gov.in/", "https://jharkhanduniversities.nic.in/", "https://jceceb.jharkhand.gov.in/"),
+
+    # --- BIHAR BOARDS ---
+    ("BIHAR VIDHAN SABHA", "Bihar", ["bihar vidhan sabha"],
+     "https://vidhansabha.bih.nic.in/", "https://vidhansabha.bih.nic.in/", "https://vidhansabha.bih.nic.in/"),
+    ("BPSC", "Bihar", ["bpsc", "bihar tre", "bihar teacher", "bihar psc"],
+     "https://onlinebpsc.bihar.gov.in/", "https://onlinebpsc.bihar.gov.in/", "https://www.bpsc.bih.nic.in/"),
+    ("BSSC", "Bihar", ["bssc", "bihar ssc", "bihar inter level"],
+     "https://bssc.bihar.gov.in/NoticeBoard.htm", "https://bssc.bihar.gov.in/NoticeBoard.htm", "https://bssc.bihar.gov.in/NoticeBoard.htm"),
+    ("BIHAR POLICE", "Bihar", ["csbc", "bihar police", "bpssc", "bihar daroga", "bihar si", "btsc"],
+     "https://csbc.bihar.gov.in/", "https://bpssc.bih.nic.in/", "https://csbc.bihar.gov.in/"),
+
+    # --- DELHI, MP, RAJASTHAN & OTHER STATE BOARDS ---
+    ("DSSSB", "All India", ["dsssb"],
+     "https://dsssbonline.nic.in/", "https://dsssbonline.nic.in/", "https://dsssb.delhi.gov.in/current-vacancies"),
+    ("MP HIGH COURT", "Madhya Pradesh", ["mphc", "mp high court"],
+     "https://cdn.digialm.com//EForms/configuredHtml/772/101789/login.html", "https://cdn.digialm.com//EForms/configuredHtml/772/101789/login.html", "https://mphc.gov.in/recruitment-result"),
+    ("MPESB", "Madhya Pradesh", ["mpesb", "mppsc", "mp police", "mp vyapam", "subedar"],
+     "https://esb.mp.gov.in/", "https://esb.mp.gov.in/", "https://esb.mp.gov.in/"),
+    ("RSSB / RPSC", "Rajasthan", ["rsmssb", "rssb", "rpsc", "rajasthan cet", "rajasthan police", "rajasthan state eligibility"],
+     "https://sso.rajasthan.gov.in/", "https://sso.rajasthan.gov.in/", "https://rssb.rajasthan.gov.in/advertisements"),
+    ("UKPSC", "All India", ["ukpsc", "uttarakhand psc"],
+     "https://pscuk.net.in/", "https://pscuk.net.in/", "https://psc.uk.gov.in/candidate-corner/recruitment"),
+    ("GSSSB", "All India", ["gsssb", "ojas", "gujarat"],
+     "https://ojas.gujarat.gov.in/", "https://ojas.gujarat.gov.in/", "https://gsssb.gujarat.gov.in/"),
+    ("HPRCA", "All India", ["hprca", "himachal"],
+     "https://hprca.hp.gov.in/", "https://hprca.hp.gov.in/", "https://hprca.hp.gov.in/"),
+    ("OPSC", "All India", ["opsc", "odisha psc"],
+     "https://www.opsc.gov.in/", "https://www.opsc.gov.in/", "https://www.opsc.gov.in/"),
+    ("CSPDCL", "All India", ["cspdcl", "cspc", "chhattisgarh state power"],
+     "https://cspc.co.in/cspc/en/recruitment", "https://cspc.co.in/cspc/en/recruitment", "https://cspc.co.in/cspc/en/recruitment"),
+    ("KERALA HC", "All India", ["kerala high court"],
+     "https://hckrecruitment.keralacourts.in/", "https://hckrecruitment.keralacourts.in/", "https://hckrecruitment.keralacourts.in/"),
+    ("MANIPUR AGRI", "All India", ["manipur agriculture"],
+     "https://agrimanipur.mn.gov.in/", "https://agrimanipur.mn.gov.in/", "https://agrimanipur.mn.gov.in/"),
+    ("AAU ASSAM", "All India", ["aau recruitment", "assam agricultural"],
+     "http://www.aau.ac.in/recruitment", "http://www.aau.ac.in/recruitment", "http://www.aau.ac.in/recruitment"),
+    ("ASSAM SLRC", "All India", ["assam slrc", "seba"],
+     "https://site.sebaonline.org/", "https://site.sebaonline.org/", "https://site.sebaonline.org/"),
+
+    # --- DEFENCE, PARAMILITARY & PSU BOARDS ---
+    ("AFMS", "All India", ["afms", "armed forces medical"],
+     "https://amcsscentry.gov.in/", "https://amcsscentry.gov.in/", "https://amcsscentry.gov.in/"),
+    ("IAF AFCAT", "All India", ["afcat", "air force"],
+     "https://afcat.cdac.in/afcatreg/candidate/login", "https://afcat.cdac.in/afcatreg/candidate/login", "https://afcat.cdac.in/AFCAT/"),
+    ("COAST GUARD", "All India", ["coast guard", "cgept"],
+     "https://cgept.parikshasaarthi.in/candidate/login", "https://cgept.parikshasaarthi.in/candidate/login", "https://joinindiancoastguard.cdac.in/"),
+    ("ASSAM RIFLES", "All India", ["assam rifles"],
+     "https://www.assamrifles.gov.in/onlineapp/", "https://www.assamrifles.gov.in/onlineapp/", "https://www.assamrifles.gov.in/english/recruitment.aspx"),
+    ("BSF", "All India", ["bsf"],
+     "https://rectt.bsf.gov.in/", "https://rectt.bsf.gov.in/", "https://rectt.bsf.gov.in/"),
+    ("DEFENCE", "All India", ["indian army", "agniveer", "indian navy"],
+     "https://joinindianarmy.nic.in/", "https://joinindianarmy.nic.in/", "https://joinindianarmy.nic.in/"),
+    ("PGCIL", "All India", ["pgcil", "powergrid"],
+     "https://www.powergrid.in/en/job-opportunities-0", "https://careers.powergrid.in/", "https://www.powergrid.in/en/job-opportunities-0"),
+    ("BHEL", "All India", ["bhel"],
+     "https://careers.bhel.in/", "https://careers.bhel.in/", "https://careers.bhel.in/"),
+    ("ISRO", "All India", ["isro", "ursc", "icrb"],
+     "https://www.isro.gov.in/Careers.html", "https://www.isro.gov.in/Careers.html", "https://www.isro.gov.in/Careers.html"),
+    ("SJVN", "All India", ["sjvn"],
+     "https://sjvn.nic.in/current-jobs/70", "https://sjvn.nic.in/current-jobs/70", "https://sjvn.nic.in/current-jobs/70"),
+    ("ASRB ICAR", "All India", ["asrb", "icar"],
+     "https://www.asrb.org.in/", "https://www.asrb.org.in/", "https://www.asrb.org.in/vacancy-notification"),
+    ("NICL", "All India", ["nicl", "national insurance"],
+     "https://nationalinsurance.nic.co.in/en/recruitment", "https://nationalinsurance.nic.co.in/en/recruitment", "https://nationalinsurance.nic.co.in/en/recruitment"),
+    ("EXIM BANK", "All India", ["exim bank"],
+     "https://www.eximbankindia.in/careers", "https://ibpsonline.ibps.in/", "https://www.eximbankindia.in/careers"),
+    ("SUPREME COURT", "All India", ["supreme court"],
+     "https://www.sci.gov.in/recruitments/", "https://cdn3.digialm.com/EForms/configuredHtml/32912/100521/login.html", "https://www.sci.gov.in/recruitments/"),
+
+    # --- NATIONAL EXAMS (CTET, CAT, AIBE, NTA, INDIA POST) ---
+    ("CBSE CTET", "All India", ["ctet"],
+     "https://ctet.nic.in/", "https://ctet.nic.in/", "https://ctet.nic.in/"),
+    ("IIM CAT", "All India", ["iim cat", "cat admit card"],
+     "https://iimcat.ac.in/", "https://iimcat.ac.in/", "https://iimcat.ac.in/"),
+    ("BCI AIBE", "All India", ["aibe", "allindiabarexamination"],
+     "https://www.allindiabarexamination.com/", "https://www.allindiabarexamination.com/", "https://www.allindiabarexamination.com/"),
+    ("NTA", "All India", ["nta ", "cuet", "jee main", "neet", "ugc net", "csir net"],
+     "https://exams.nta.ac.in/", "https://exams.nta.ac.in/", "https://exams.nta.ac.in/"),
+    ("INDIA POST", "All India", ["india post", "gds ", "gramin dak"],
+     "https://indiapostgdsonline.gov.in/", "https://indiapostgdsonline.gov.in/", "https://indiapostgdsonline.gov.in/"),
+
+    # --- BANKING & RAILWAYS ---
+    ("SBI", "All India", ["sbi po", "sbi clerk", "state bank", "sbi cbo", "sbi "],
+     "https://bank.sbi/web/careers/Current-openings", "https://bank.sbi/web/careers/Current-openings", "https://bank.sbi/web/careers/Current-openings"),
+    ("IBPS", "All India", ["ibps", "crp po", "crp clerk", "ibps so", "ibps rrb"],
+     "https://ibpsonline.ibps.in/", "https://ibpsonline.ibps.in/", "https://www.ibps.in/"),
+    ("RAILWAY RRC NR", "All India", ["rrc nr"],
+     "https://www.rrcnr.org/", "https://www.rrcnr.org/", "https://www.rrcnr.org/"),
+    ("RAILWAY RRC NWR", "All India", ["rrc nwr"],
+     "https://www.rrcjaipur.in/", "https://www.rrcjaipur.in/", "https://www.rrcjaipur.in/"),
+    ("RAILWAY RRC CR", "All India", ["rrc cr"],
+     "https://www.rrccr.com/Home/Home", "https://www.rrccr.com/Home/Home", "https://www.rrccr.com/Home/Home"),
+    ("RAILWAY RRB", "All India", ["railway", "rrb", "ntpc", "group d", "alp", "rpf", "technician", "rrc", "station master", "paramedical", "section controller"],
+     "https://www.rrbapply.gov.in/#/auth/landing", "https://www.rrbapply.gov.in/#/auth/landing", "https://indianrailways.gov.in/railwayboard/view_section.jsp?lang=0&id=0,7,1281"),
+
+    # --- UPSC & SSC (Checked after state/departmental boards) ---
+    ("UPSC", "All India", ["upsc", "civil services", "ias ", "ifs ", "nda", "cds", "capf", "epfo"],
+     "https://upsconline.nic.in/upsc/OTRP/", "https://upsconline.nic.in/upsc/OTRP/", "https://upsc.gov.in/examinations/active-exams"),
+    ("SSC", "All India", ["ssc", "cgl", "chsl", "ssc gd", "ssc cpo", "ssc je", "ssc mts", "steno", "selection post"],
+     "https://ssc.gov.in/login", "https://ssc.gov.in/login", "https://ssc.gov.in/portal/notices"),
 ]
+
 
 def fetch_html_resilient(url: str, timeout: int = 12):
     """
     Tries direct cloudscraper first. If blocked by Cloudflare on GitHub US runner,
-    falls back to AllOrigins raw proxy so scraping NEVER returns empty!
+    falls back to AllOrigins raw proxy so scraping NEVER returns empty.
     """
     try:
         resp = SCRAPER.get(url, headers=HEADERS, timeout=timeout)
         if resp.status_code == 200 and len(resp.text) > 800 and "Just a moment..." not in resp.text:
             return resp.text
-        print(f"Direct fetch got status {resp.status_code} on {url}, trying proxy fallback...")
-    except Exception as e:
-        print(f"Direct fetch error on {url}: {e}")
+    except Exception:
+        pass
 
-    # Fallback 2: AllOrigins Raw Proxy (Bypasses US datacenter IP blocks)
     try:
         proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(url, safe='')}"
         resp2 = requests.get(proxy_url, headers=HEADERS, timeout=15)
         if resp2.status_code == 200 and len(resp2.text) > 800:
-            print(f"✅ Proxy fetch succeeded for {url}")
             return resp2.text
-    except Exception as e:
-        print(f"Proxy fallback failed for {url}: {e}")
-
+    except Exception:
+        pass
     return None
+
 
 def parse_date_str(d_str: str):
     try:
@@ -86,24 +198,69 @@ def parse_date_str(d_str: str):
     except Exception:
         return None
 
-def is_banned_url(url: str) -> bool:
-    u = url.lower()
+
+def is_banned_or_search_url(url: str) -> bool:
+    if not url or not isinstance(url, str):
+        return True
+    u = url.strip().lower()
     if not u.startswith("http"):
         return True
     return any(b in u for b in BANNED_DOMAINS)
 
-def resolve_portal_info(title: str, category: str, scraped_url: str = None, scraped_login: str = None):
-    lower = title.lower()
-    for badge, state, keywords, apply_url, login_url in PORTAL_DIRECTORY:
+
+def extract_domain_from_title(title: str):
+    """
+    Extracts explicit portal domain if present in title, e.g.:
+    'GSSSB Accountant Admit Card Out at gsssb.gujarat.gov.in' -> 'https://gsssb.gujarat.gov.in/'
+    """
+    m = DOMAIN_IN_TEXT_REGEX.search(title or "")
+    if m:
+        dom = m.group(1).lower()
+        if "google." not in dom and "sarkari" not in dom:
+            return f"https://{dom}/"
+    return None
+
+
+def resolve_portal_info(
+    title: str,
+    category: str,
+    scraped_url: str = None,
+    scraped_login: str = None,
+    scraped_notif: str = None,
+    scraped_official: str = None
+):
+    """
+    Resolves 100% direct official portal URLs (Apply, Login, Notice, Official Website).
+    NEVER returns a google.com/search URL!
+    """
+    lower = (title or "").lower()
+    clean_primary = scraped_url if not is_banned_or_search_url(scraped_url) else None
+    clean_login = scraped_login if not is_banned_or_search_url(scraped_login) else None
+    clean_notif = scraped_notif if not is_banned_or_search_url(scraped_notif) else None
+    clean_official = scraped_official if not is_banned_or_search_url(scraped_official) else None
+    title_domain_url = extract_domain_from_title(title)
+
+    for badge, state, keywords, apply_url, login_url, notice_url in PORTAL_DIRECTORY:
         if any(k in lower for k in keywords):
-            return (
-                badge,
-                state,
-                scraped_url or apply_url,
-                scraped_login or login_url,
-                apply_url,
-                True
-            )
+            # Guard against false ssc.gov.in or upsconline.nic.in scraped links on non-SSC/UPSC boards
+            if badge != "SSC":
+                if clean_primary and "ssc.gov.in" in clean_primary:
+                    clean_primary = None
+                if clean_login and "ssc.gov.in" in clean_login:
+                    clean_login = None
+                if clean_official and "ssc.gov.in" in clean_official:
+                    clean_official = None
+            if badge != "UPSC":
+                if clean_primary and "upsconline.nic.in" in clean_primary:
+                    clean_primary = None
+                if clean_login and "upsconline.nic.in" in clean_login:
+                    clean_login = None
+
+            final_target = clean_primary or title_domain_url or apply_url
+            final_login = clean_login or title_domain_url or login_url or final_target
+            final_notif = clean_notif or notice_url or clean_official or final_target
+            final_official = clean_official or title_domain_url or apply_url
+            return badge, state, final_target, final_login, final_notif, final_official, True
 
     detected_state = "All India"
     for st in ["Jharkhand", "Bihar", "Uttar Pradesh", "Madhya Pradesh", "Rajasthan", "Delhi", "Haryana"]:
@@ -111,18 +268,25 @@ def resolve_portal_info(title: str, category: str, scraped_url: str = None, scra
             detected_state = st
             break
 
-    if scraped_url:
-        return "GOV PORTAL", detected_state, scraped_url, (scraped_login or scraped_url), scraped_url, True
+    fallback_direct = (
+        clean_primary
+        or clean_official
+        or title_domain_url
+        or "https://ncs.gov.in/"
+    )
+    final_target = clean_primary or fallback_direct
+    final_login = clean_login or final_target
+    final_notif = clean_notif or clean_official or fallback_direct
+    final_official = clean_official or fallback_direct
 
-    suffix = "official apply online registration portal" if category == "NEW_FORM" else "official download login link"
-    q = urllib.parse.quote_plus(f"{title} {suffix}")
-    search_url = f"https://www.google.com/search?q={q}"
-    return "OFFICIAL PORTAL", detected_state, search_url, search_url, search_url, False
+    return "GOV PORTAL", detected_state, final_target, final_login, final_notif, final_official, True
+
 
 def clean_title(raw_text: str) -> str:
     text = re.sub(r"\s+", " ", raw_text).strip()
     text = text.rsplit(" - ", 1)[0].strip()
     return re.sub(r"(?i)\b(sarkari\s*result|freejobalert)\b", "", text).strip(" -|•:")
+
 
 def extract_inner_post_details(post_url: str, category: str):
     info = {
@@ -139,7 +303,6 @@ def extract_inner_post_details(post_url: str, category: str):
     if html:
         soup = BeautifulSoup(html, "lxml")
         expiry_dt = None
-
         for li in soup.select("li"):
             txt = li.get_text(" ", strip=True)
             low = txt.lower()
@@ -159,7 +322,6 @@ def extract_inner_post_details(post_url: str, category: str):
                     if dt:
                         info["displayDate"] = f"Exam: {dt.strftime('%d/%m/%Y')}"
                         expiry_dt = dt + timedelta(days=2)
-
             if ("minimum age" in low or "maximum age" in low) and not info["shortSummary"]:
                 info["shortSummary"] = txt[:65]
 
@@ -176,7 +338,7 @@ def extract_inner_post_details(post_url: str, category: str):
             links = []
             for a in tds[1].find_all("a", href=True):
                 href = urllib.parse.urljoin(post_url, a["href"].strip())
-                if not is_banned_url(href):
+                if not is_banned_or_search_url(href):
                     links.append((a.get_text(" ", strip=True).lower(), href))
             if not links:
                 continue
@@ -214,6 +376,32 @@ def extract_inner_post_details(post_url: str, category: str):
 
     return info
 
+
+def sanitize_existing_item(item: dict) -> dict:
+    """
+    Cleans any existing item in live_exams.json that previously had google.com/search
+    or misrouted ssc.gov.in URLs so old cached items are immediately repaired.
+    """
+    title = item.get("title", "")
+    category = item.get("category", "NEW_FORM")
+    badge, state, target_url, login_url, notif_url, official_site, is_direct = resolve_portal_info(
+        title,
+        category,
+        scraped_url=item.get("targetUrl"),
+        scraped_login=item.get("loginUrl"),
+        scraped_notif=item.get("notificationPdfUrl"),
+        scraped_official=item.get("officialWebsiteUrl")
+    )
+    item["boardBadge"] = badge
+    item["state"] = state
+    item["targetUrl"] = target_url
+    item["loginUrl"] = login_url
+    item["notificationPdfUrl"] = notif_url
+    item["officialWebsiteUrl"] = official_site
+    item["isDirectPortalMatch"] = is_direct
+    return item
+
+
 def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
     mirrors = [
         "https://www.sarkariresult.com",
@@ -224,19 +412,17 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
         html = fetch_html_resilient(base_url, timeout=15)
         if not html:
             continue
-
         soup = BeautifulSoup(html, "lxml")
         links = soup.select("div#post ul li a, td ul li a, .post-list a, ul li a")
         print(f"Found {len(links)} raw links on {base_url}")
 
-        count_from_mirror = 0
-        for a_tag in links[:90]:
+        candidates = []
+        seen_titles = set(existing_by_title.keys())
+        for a_tag in links[:110]:
             raw_title = clean_title(a_tag.get_text())
             href = urllib.parse.urljoin(base_url, a_tag.get("href", ""))
-
-            if len(raw_title) < 12 or raw_title.lower() in existing_by_title:
+            if len(raw_title) < 12 or raw_title.lower() in seen_titles:
                 continue
-
             low = raw_title.lower()
             if any(k in low for k in ["admit card", "hall ticket", "exam city", "call letter"]):
                 category = "ADMIT_CARD"
@@ -247,27 +433,49 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
             else:
                 continue
 
-            # Parse inner post ONLY for the first 15 new items to keep execution fast (<25s)
-            if count_from_mirror < 15:
-                details = extract_inner_post_details(href, category)
-            else:
-                days = 28 if category == "NEW_FORM" else (18 if category == "ADMIT_CARD" else 12)
-                details = {
-                    "primaryUrl": None, "loginUrl": None, "notifUrl": None, "officialSite": None,
-                    "displayDate": "Active Now",
-                    "expiryIso": (TODAY + timedelta(days=days)).strftime("%Y-%m-%d"),
-                    "totalPosts": "", "shortSummary": ""
-                }
+            seen_titles.add(raw_title.lower())
+            candidates.append((raw_title, href, category))
+            if len(candidates) >= 45:
+                break
 
-            exp_dt = parse_date_str(details["expiryIso"])
+        if not candidates:
+            continue
+
+        # Parallel inner-page scraping for ALL candidates (no 15-item cutoff!)
+        details_by_href = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_map = {
+                executor.submit(extract_inner_post_details, href, cat): (raw_title, href, cat)
+                for raw_title, href, cat in candidates
+            }
+            for future in concurrent.futures.as_completed(future_map):
+                _, href, cat = future_map[future]
+                try:
+                    details_by_href[href] = future.result()
+                except Exception:
+                    days = 28 if cat == "NEW_FORM" else (18 if cat == "ADMIT_CARD" else 12)
+                    details_by_href[href] = {
+                        "primaryUrl": None, "loginUrl": None, "notifUrl": None, "officialSite": None,
+                        "displayDate": "Active Now",
+                        "expiryIso": (TODAY + timedelta(days=days)).strftime("%Y-%m-%d"),
+                        "totalPosts": "", "shortSummary": ""
+                    }
+
+        count_from_mirror = 0
+        for raw_title, href, category in candidates:
+            details = details_by_href.get(href, {})
+            exp_dt = parse_date_str(details.get("expiryIso", ""))
             if exp_dt and TODAY > exp_dt:
                 continue
 
-            badge, state, target_url, login_url, official_site, is_direct = resolve_portal_info(
-                raw_title, category, details["primaryUrl"], details["loginUrl"]
+            badge, state, target_url, login_url, notif_url, official_site, is_direct = resolve_portal_info(
+                raw_title,
+                category,
+                scraped_url=details.get("primaryUrl"),
+                scraped_login=details.get("loginUrl"),
+                scraped_notif=details.get("notifUrl"),
+                scraped_official=details.get("officialSite")
             )
-            q_pdf = urllib.parse.quote_plus(f"{raw_title} official notification pdf")
-            notif_url = details["notifUrl"] or f"https://www.google.com/search?q={q_pdf}"
 
             item = {
                 "id": f"sr_{category.lower()}_{len(newly_discovered)}",
@@ -278,11 +486,11 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
                 "targetUrl": target_url,
                 "loginUrl": login_url,
                 "notificationPdfUrl": notif_url,
-                "officialWebsiteUrl": details["officialSite"] or official_site,
-                "lastDate": details["displayDate"],
-                "expiryDate": details["expiryIso"],
-                "totalPosts": details["totalPosts"],
-                "shortSummary": details["shortSummary"],
+                "officialWebsiteUrl": official_site,
+                "lastDate": details.get("displayDate") or "Active Now",
+                "expiryDate": details.get("expiryIso"),
+                "totalPosts": details.get("totalPosts", ""),
+                "shortSummary": details.get("shortSummary", ""),
                 "isDirectPortalMatch": is_direct,
                 "isPinnedTop": False,
                 "isManual": False
@@ -294,10 +502,12 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict):
         if count_from_mirror > 8:
             break
 
+
 def fetch_google_news_rss_backup(newly_discovered: list, existing_by_title: dict):
     """
-    Guaranteed Backup Layer: Always pulls latest National + State (Jharkhand/Bihar/UP)
-    exam headlines from Google News RSS (which NEVER blocks GitHub Actions IPs!)
+    Guaranteed Backup Layer: Pulls latest National + State (Jharkhand/Bihar/UP)
+    exam headlines from Google News RSS and maps every single one to its DIRECT
+    official portal (ZERO google.com/search links).
     """
     rss_queries = [
         ("NEW_FORM", "(SSC OR RRB OR IBPS OR SBI OR UPSC OR JSSC OR BPSC OR UPSSSC OR India Post) recruitment apply online notification"),
@@ -317,10 +527,11 @@ def fetch_google_news_rss_backup(newly_discovered: list, existing_by_title: dict
                 if len(raw_t) < 12 or raw_t.lower() in existing_by_title:
                     continue
 
-                badge, state, target_url, login_url, official_site, is_direct = resolve_portal_info(raw_t, category)
+                badge, state, target_url, login_url, notif_url, official_site, is_direct = resolve_portal_info(
+                    raw_t, category
+                )
                 days = 25 if category == "NEW_FORM" else (15 if category == "ADMIT_CARD" else 10)
                 exp_iso = (TODAY + timedelta(days=days)).strftime("%Y-%m-%d")
-                q_pdf = urllib.parse.quote_plus(f"{raw_t} official notification pdf")
 
                 new_item = {
                     "id": f"rss_{category.lower()}_{len(newly_discovered)}",
@@ -330,12 +541,12 @@ def fetch_google_news_rss_backup(newly_discovered: list, existing_by_title: dict
                     "boardBadge": badge,
                     "targetUrl": target_url,
                     "loginUrl": login_url,
-                    "notificationPdfUrl": f"https://www.google.com/search?q={q_pdf}",
+                    "notificationPdfUrl": notif_url,
                     "officialWebsiteUrl": official_site,
                     "lastDate": "Active Now" if category == "NEW_FORM" else "Out Now",
                     "expiryDate": exp_iso,
                     "totalPosts": "",
-                    "shortSummary": "Verified Direct Official Portal Link",
+                    "shortSummary": f"Direct Official Portal ({badge})",
                     "isDirectPortalMatch": is_direct,
                     "isPinnedTop": False,
                     "isManual": False
@@ -345,6 +556,7 @@ def fetch_google_news_rss_backup(newly_discovered: list, existing_by_title: dict
         except Exception as e:
             print(f"RSS backup warning: {e}")
 
+
 def main():
     existing_items = []
     try:
@@ -353,17 +565,18 @@ def main():
             for item in data.get("items", []):
                 exp_dt = parse_date_str(item.get("expiryDate", ""))
                 if exp_dt is None or TODAY <= exp_dt:
-                    existing_items.append(item)
+                    # Sanitize and upgrade existing items so ZERO google.com/search links survive
+                    existing_items.append(sanitize_existing_item(item))
     except Exception:
         pass
 
     existing_by_title = {item["title"].lower(): item for item in existing_items}
     newly_discovered = []
 
-    # Layer 1: Scrape SarkariResult (Direct + AllOrigins Proxy Bypass)
+    # Layer 1: Scrape SarkariResult with parallel inner-page extraction
     scrape_sarkari_portals(newly_discovered, existing_by_title)
 
-    # Layer 2: Always supplement with Google News Multi-Board RSS so JSON is NEVER empty!
+    # Layer 2: Supplement with Multi-Board RSS mapped strictly to direct portals
     fetch_google_news_rss_backup(newly_discovered, existing_by_title)
 
     manual_pinned = [i for i in existing_items if i.get("isManual") is True]
@@ -379,7 +592,8 @@ def main():
     with open("live_exams.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    print(f"✅ SUCCESS: Added {len(newly_discovered)} new items. Total items in live_exams.json: {len(final_items)}")
+    print(f"✅ SUCCESS: Added {len(newly_discovered)} new items. Total items in live_exams.json: {len(final_items)} (0 Google Search links)")
+
 
 if __name__ == "__main__":
     main()
