@@ -1,5 +1,6 @@
 import concurrent.futures
 import hashlib
+import html as html_lib
 import json
 import re
 import urllib.parse
@@ -269,6 +270,52 @@ def is_banned_or_search_url(url: str) -> bool:
     return any(b in u for b in BANNED_DOMAINS)
 
 
+def build_strict_gov_search_url(title: str, board_badge: str = "") -> str:
+    """
+    Builds a strict government-domain-only Google search URL (site:gov.in OR site:nic.in OR site:ac.in)
+    so users never land on private ad-filled blogs when a deep link is missing or unknown.
+    """
+    cleaned = re.sub(r"\([^)]*\)", " ", title or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if board_badge and board_badge not in ("GOV PORTAL", "OFFICIAL PORTAL") and board_badge.lower() not in cleaned.lower():
+        query_base = f"{board_badge} {cleaned}"
+    else:
+        query_base = cleaned
+    full_query = f"{query_base} (site:gov.in OR site:nic.in OR site:ac.in)"
+    return f"https://www.google.com/search?q={urllib.parse.quote_plus(full_query)}"
+
+
+def check_deep_link_not_404(url: str, timeout: int = 6) -> bool:
+    """
+    Checks whether an ephemeral deep link returns a hard 404/410 Not Found error.
+    Timeouts or 403/405 firewall blocks from .gov.in servers are treated as reachable
+    so valid Indian government portals aren't falsely discarded from foreign GitHub runners.
+    """
+    if not url or not url.startswith("http"):
+        return False
+    try:
+        if SCRAPER is not None:
+            resp = SCRAPER.head(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+            if resp.status_code in (404, 410):
+                return False
+            if resp.status_code == 405:
+                resp_get = SCRAPER.get(url, headers=HEADERS, timeout=timeout, stream=True)
+                status = resp_get.status_code
+                resp_get.close()
+                if status in (404, 410):
+                    return False
+            return True
+        req = urllib.request.Request(url, headers=HEADERS, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status not in (404, 410)
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 410):
+            return False
+        return True
+    except Exception:
+        return True
+
+
 def extract_domain_from_title(title: str):
     m = DOMAIN_IN_TEXT_REGEX.search(title or "")
     if m:
@@ -325,6 +372,12 @@ def resolve_portal_info(
             final_login = clean_login or title_domain_url or login_url or final_target
             final_notif = clean_notif or notice_url or clean_official or final_target
             final_official = clean_official or title_domain_url or notice_url or apply_url
+
+            # Rescue hard 404/410 deep links automatically using verified board portals
+            if clean_primary and final_target == clean_primary and not check_deep_link_not_404(final_target):
+                print(f"⚠️ Rescued 404 deep link for '{title[:40]}': {final_target} -> {apply_url}")
+                final_target = apply_url
+
             return badge, state, final_target, final_login, final_notif, final_official, True
 
     detected_state = "All India"
@@ -333,18 +386,18 @@ def resolve_portal_info(
             detected_state = st
             break
 
-    fallback_direct = (
-        clean_primary
-        or clean_official
-        or title_domain_url
-        or "https://ncs.gov.in/"
-    )
-    final_target = clean_primary or fallback_direct
-    final_login = clean_login or final_target
-    final_notif = clean_notif or clean_official or fallback_direct
-    final_official = clean_official or fallback_direct
+    strict_gov_search = build_strict_gov_search_url(title)
+    direct_candidate = clean_primary or clean_official or title_domain_url
 
-    return "GOV PORTAL", detected_state, final_target, final_login, final_notif, final_official, True
+    if direct_candidate and check_deep_link_not_404(direct_candidate):
+        final_target = direct_candidate
+        final_login = clean_login or final_target
+        final_notif = clean_notif or clean_official or final_target
+        final_official = clean_official or title_domain_url or final_target
+        return "GOV PORTAL", detected_state, final_target, final_login, final_notif, final_official, True
+
+    # Unknown board & no working direct portal link -> strict .gov.in / .nic.in rescue search
+    return "GOV PORTAL", detected_state, strict_gov_search, strict_gov_search, strict_gov_search, strict_gov_search, False
 
 
 def clean_title(raw_text: str) -> str:
@@ -475,6 +528,7 @@ def sanitize_existing_item(item: dict) -> dict:
     item["loginUrl"] = login_url
     item["notificationPdfUrl"] = notif_url
     item["officialWebsiteUrl"] = official_site
+    item["govSearchUrl"] = build_strict_gov_search_url(title, badge)
     if not item.get("totalPosts"):
         item["totalPosts"] = extract_posts_from_text(title)
     item["isDirectPortalMatch"] = is_direct
@@ -577,10 +631,11 @@ def scrape_sarkari_portals(newly_discovered: list, existing_by_title: dict, seen
                 "loginUrl": login_url,
                 "notificationPdfUrl": notif_url,
                 "officialWebsiteUrl": official_site,
+                "govSearchUrl": build_strict_gov_search_url(raw_title, badge),
                 "lastDate": details.get("displayDate") or "Active Now",
                 "expiryDate": details.get("expiryIso"),
                 "totalPosts": posts_str,
-                "shortSummary": details.get("shortSummary") or f"Verified Direct Portal ({badge})",
+                "shortSummary": details.get("shortSummary") or (f"Verified Direct Portal ({badge})" if is_direct else "Official .gov.in / .nic.in Lookup"),
                 "isDirectPortalMatch": is_direct,
                 "isPinnedTop": False,
                 "isManual": False
@@ -620,7 +675,7 @@ def fetch_google_news_rss_backup(newly_discovered: list, existing_by_title: dict
                 badge, state, target_url, login_url, notif_url, official_site, is_direct = resolve_portal_info(
                     raw_t, category
                 )
-                if badge == "GOV PORTAL" and "ncs.gov.in" in target_url:
+                if not is_direct:
                     continue
 
                 seen_signatures.add(sig)
@@ -637,6 +692,7 @@ def fetch_google_news_rss_backup(newly_discovered: list, existing_by_title: dict
                     "loginUrl": login_url,
                     "notificationPdfUrl": notif_url,
                     "officialWebsiteUrl": official_site,
+                    "govSearchUrl": build_strict_gov_search_url(raw_t, badge),
                     "lastDate": "Active Now" if category == "NEW_FORM" else "Out Now",
                     "expiryDate": exp_iso,
                     "totalPosts": extract_posts_from_text(raw_t),
