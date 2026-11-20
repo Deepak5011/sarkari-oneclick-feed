@@ -2,12 +2,12 @@ name: Auto Sync Sarkari Exams JSON
 
 on:
   schedule:
-    - cron: '37 1 * * *'   # ~7:07 AM IST (Subah)
-    - cron: '43 5 * * *'   # ~11:13 AM IST (Subah/Dopahar)
-    - cron: '23 9 * * *'   # ~2:53 PM IST (Dopahar)
-    - cron: '51 13 * * *'  # ~7:21 PM IST (Shaam)
-    - cron: '19 17 * * *'  # ~10:49 PM IST (Raat)
-  workflow_dispatch:       # Manual 1-click run
+    - cron: '37 1 * * *'   # ~07:07 AM IST (Morning)
+    - cron: '43 5 * * *'   # ~11:13 AM IST (Late Morning)
+    - cron: '23 9 * * *'   # ~02:53 PM IST (Afternoon)
+    - cron: '51 13 * * *'  # ~07:21 PM IST (Evening)
+    - cron: '19 17 * * *'  # ~10:49 PM IST (Night)
+  workflow_dispatch:       # 1-click manual trigger from GitHub Actions
 
 permissions:
   contents: write
